@@ -24,7 +24,9 @@ Node.js 22以上とPython 3で `npm test`、`npm start`。http://localhost:8080 
 
 ## GitHub Pages
 
-コードを対象リポジトリのmainブランチへ追加し、Settings → Pages → SourceをGitHub Actionsに設定する。同梱workflowが `web/` のみを公開する。リポジトリが公開ならGASのソースも閲覧できるので、スクリプトプロパティや鍵をコミットしない。
+コードを対象リポジトリのmainブランチへ追加し、Settings → Pages → SourceをGitHub Actionsに設定する。同梱workflowが入口の `index.html` と `.nojekyll`、キャンバス本体の `web/` をまとめて公開する。トップURLは `web/` へ移動する。
+
+mainブランチのルートを直接公開する設定でも、同じ入口からキャンバスを開ける。ルートの `.nojekyll` でREADMEのJekyll変換を無効化する。リポジトリが公開ならGASのソースも閲覧できるので、スクリプトプロパティや鍵をコミットしない。
 
 ## 実接続の受け入れ確認
 
