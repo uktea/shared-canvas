@@ -15,7 +15,7 @@ async function browser({pending=[],modern=true,initialized=false,intercept,size=
   const serverContext=vm.createContext({});vm.runInContext(fs.readFileSync('web/core.js','utf8'),serverContext);
   const serverCore=serverContext.PixelCore;serverCore.setSize(size);
   const elements=new Map(),requests=[],serverEvents=[],timers=new Map();
-  let poll,timerId=0;
+  let poll,timerId=0,currentTime=1000000;
   function element(id){
     if(!elements.has(id))elements.set(id,{
       value:({color:'#333333',size:'1',zoom:'fit'})[id]||'',style:{},clientWidth:800,clientHeight:600,
@@ -64,6 +64,8 @@ async function browser({pending=[],modern=true,initialized=false,intercept,size=
       :{ok:true,...capabilities,kind:'delta',version:serverEvents.length,events:structuredClone(serverEvents.slice(Number(request.url.searchParams.get('since'))))};
   }
   const context=vm.createContext({
+    Date:class extends Date{static now(){return currentTime;}},
+    Math:Object.assign(Object.create(Math),{random:()=>0}),
     crypto:{randomUUID},structuredClone,URL,AbortSignal,TextEncoder,Uint8ClampedArray,
     document:{getElementById:element,addEventListener(){},hidden:false},
     window:{CANVAS_ENDPOINT:endpoint===undefined?'https://script.google.com/macros/s/test/exec':endpoint,addEventListener(){}},
@@ -82,7 +84,7 @@ async function browser({pending=[],modern=true,initialized=false,intercept,size=
   await vm.runInContext(fs.readFileSync('web/app.js','utf8'),context);await settle();
   return {
     requests,serverEvents,elements,get stored(){return structuredClone(stored);},
-    async poll(){poll();await settle();},
+    async poll(elapsed=0){currentTime+=elapsed;poll();await settle();},
     async flush(){const callbacks=[...timers.values()];timers.clear();for(const callback of callbacks)callback();await settle();},
     async draw(x=15,y=15){
       const canvas=element('canvas');
@@ -134,9 +136,9 @@ test('failed and lost responses preserve pending IDs and retries accept every op
   }});
   assert.deepEqual(b.stored.pending.map(op=>op.id),pending.map(op=>op.id));
   assert.equal(b.serverEvents.length,2);
-  await b.poll();
+  await b.poll(5000);
   const bodies=b.requests.filter(request=>request.body).map(request=>request.body);
-  assert.deepEqual(bodies[0],bodies[1]);
+  assert.equal(bodies.length,1);assert.equal(b.requests.at(-1).method,'GET');
   assert.equal(b.stored.pending.length,0);assert.equal(b.serverEvents.length,2);
 });
 test('an old GAS deployment continues receiving single operations without extra preflight reads',async()=>{
@@ -198,4 +200,35 @@ test('a fresh browser-local canvas starts at 1024 while existing 256 data retain
   const existing=await browser({endpoint:'',storedState:{author:'author-one',events:[{...stroke('local-old'),version:1}],pending:[],version:1,initialized:false}});
   assert.equal(existing.elements.get('canvas').width,256);
   assert.equal(existing.stored.events[0].id,'operation-local-old');assert.equal(existing.requests.length,0);
+});
+
+test('busy responses back off exponentially and drawing does not bypass the retry delay',async()=>{
+  let posts=0;
+  const b=await browser({pending:[stroke('backoff-first')],intercept:async(request,server)=>{
+    if(request.method==='POST'&&++posts<=2)return {ok:false,code:'BUSY',retryAfterMs:2000,error:'busy'};
+    return server(request);
+  }});
+  assert.equal(posts,1);
+  await b.draw();await b.flush();await b.poll(1999);assert.equal(posts,1);
+  await b.poll(1);assert.equal(posts,2);
+  await b.poll(3999);assert.equal(posts,2);
+  await b.poll(1);assert.equal(posts,3);
+  assert.equal(b.stored.pending.length,0);assert.equal(b.serverEvents.length,2);
+});
+test('receipt checks retain operations while RGB is behind and clear them once the writer finishes',async()=>{
+  let applied=0,first=true;
+  const b=await browser({pending:[stroke('rgb-receipt')],intercept:async(request,server)=>{
+    if(request.method==='POST'&&!first)return {ok:false,code:'BUSY',retryAfterMs:2000,error:'writer still running'};
+    const result=server(request);
+    if(request.method==='POST'&&first){first=false;throw Error('response timed out');}
+    return {...result,appliedVersion:applied};
+  }});
+  assert.equal(b.stored.pending.length,1);
+  await b.poll(5000);
+  assert.equal(b.stored.version,1);assert.equal(b.stored.events.length,1);assert.equal(b.stored.pending.length,1);
+  assert.equal(b.serverEvents.length,1);
+  applied=1;const count=b.requests.filter(request=>request.method==='POST').length;
+  await b.poll(4000);
+  assert.equal(b.stored.pending.length,0);assert.equal(b.serverEvents.length,1);
+  assert.equal(b.requests.filter(request=>request.method==='POST').length,count);
 });

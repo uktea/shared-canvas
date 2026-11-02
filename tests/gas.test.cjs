@@ -3,8 +3,8 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 function harness({size=256,beforeSetup}={}){
-  let locked=false,failRGB=null;
-  const writes=[],reads=[];
+  let locked=false,failRGB=null,contended=false;
+  const writes=[],reads=[],lockAttempts=[];
   class Sheet {
     constructor(){this.rows=[];this.columns=26;this.maxRows=1000;}
     getMaxColumns(){return this.columns;}getMaxRows(){return this.maxRows;}
@@ -18,7 +18,7 @@ function harness({size=256,beforeSetup}={}){
     };}
   }
   const sheets=new Map(),ss={getSheetByName:n=>sheets.get(n),insertSheet(n){const s=new Sheet();s.name=n;sheets.set(n,s);return s;}};
-  const lock={waitLock(){assert.equal(locked,false);locked=true;},tryLock(){assert.equal(locked,false);locked=true;return true;},releaseLock(){locked=false;}};
+  const lock={waitLock(){assert.equal(locked,false);locked=true;},tryLock(timeout){lockAttempts.push(timeout);if(contended)return false;assert.equal(locked,false);locked=true;return true;},releaseLock(){locked=false;}};
   const context=vm.createContext({LockService:{getScriptLock:()=>lock},PropertiesService:{getScriptProperties:()=>({getProperty:()=> 'test-sheet-id'})},SpreadsheetApp:{openById:()=>ss,flush(){}},ContentService:{MimeType:{JSON:'json'},createTextOutput:text=>({text,setMimeType(){return this;}})}});
   vm.runInContext(fs.readFileSync('gas/Core.gs','utf8')+'\n'+fs.readFileSync('gas/Code.gs','utf8'),context);
   // Small fixtures exercise the same protocol; dedicated tests use the full grid.
@@ -38,7 +38,7 @@ function harness({size=256,beforeSetup}={}){
     }
     return {...result,kind:'snapshot',pixels:Array.from(pixels)};
   }
-  return {ss,context,writes,reads,rawGet,get,failNextRGB(){failRGB=0;},failAfterRGB(count){failRGB=count;},post(op,since=0){const r=JSON.parse(context.doPost({parameter:{client:'3',since:String(since)},postData:{contents:JSON.stringify(op)}}).text);assert.equal(locked,false);return r;}};
+  return {ss,context,writes,reads,rawGet,get,lockAttempts,canvasPixels(){const sheet=ss.getSheetByName('Canvas1024');return Array.from({length:size*size},(_,i)=>parseInt(String(sheet.rows[Math.floor(i/size)]?.[i%size]).slice(1),16));},setContended(value){contended=value;},failNextRGB(){failRGB=0;},failAfterRGB(count){failRGB=count;},post(op,since=0){const r=JSON.parse(context.doPost({parameter:{client:'3',since:String(since)},postData:{contents:JSON.stringify(op)}}).text);assert.equal(locked,false);return r;}};
 }
 const stroke=(name,author='author-a',color='#ff0000')=>({id:'operation-'+name,author,type:'stroke',target:'stroke-'+name,points:[[10,10],[12,12]],color,size:1});
 const undo=(s,author=s.author)=>({id:'undo-operation-'+s.target,author,type:'undo',target:s.target});
@@ -113,7 +113,7 @@ test('interrupted regional write repairs the full image before retry without dup
   const result=h.post({operations});assert.equal(result.ok,true);assert.equal(result.version,2);
   assert.equal(h.ss.getSheetByName('履歴').getLastRow(),3);
   const snapshot=h.get();
-  assert.deepEqual(snapshot.pixels,Array.from(h.context.PixelCore.render(snapshot.events)));
+  assert.deepEqual(h.canvasPixels(),Array.from(h.context.PixelCore.render(snapshot.events)));
 });
 test('regional updates equal full replay for clipped brushes, distant strokes, Undo and Redo',()=>{
   const h=harness();
@@ -123,7 +123,7 @@ test('regional updates equal full replay for clipped brushes, distant strokes, U
   for(const operations of [[a,b],[undo(a)],[{id:'redo-edge-operation',author:a.author,target:a.target,type:'redo'},c],[undo(c)]]){
     assert.equal(h.post({operations}).ok,true);
     const snapshot=h.get();
-    assert.deepEqual(snapshot.pixels,Array.from(h.context.PixelCore.render(snapshot.events)));
+    assert.deepEqual(h.canvasPixels(),Array.from(h.context.PixelCore.render(snapshot.events)));
   }
 });
 test('normal polling reads only the missing history tail and never the RGB grid',()=>{
@@ -151,6 +151,7 @@ test('1024 setup preserves the original sheet, history, IDs and clipped legacy p
   const image=h.get();assert.equal(image.canvasSize,1024);assert.equal(image.version,1);
   assert.equal(image.pixels[255*1024+255],0xff0000);assert.equal(image.pixels[255*1024+256],0xffffff);
   assert.equal(image.pixels[256*1024+255],0xffffff);
+  assert.deepEqual(h.canvasPixels(),image.pixels);
   assert.equal(h.post({...legacy,canvasSize:256}).ok,true);
   assert.equal(h.ss.getSheetByName('履歴').getLastRow(),2);
   assert.equal(h.ss.getSheetByName('Canvas1024').getRange(1026,2).getValue(),1);
@@ -166,7 +167,7 @@ test('1024 strokes reach the far corner, preserve overlap on Undo/Redo and load 
   const manifest=h.rawGet();assert.equal(manifest.kind,'snapshot-manifest');assert.deepEqual(manifest.tiles,[[768,768]]);
   assert.ok(h.reads.every(read=>read.sheet!=='Canvas1024'||read.row>1024));
   const snapshot=h.get();assert.equal(snapshot.pixels.length,1048576);assert.equal(snapshot.pixels.at(-1),0x0000ff);
-  assert.deepEqual(snapshot.pixels,Array.from(h.context.PixelCore.render(snapshot.events)));
+  assert.deepEqual(h.canvasPixels(),Array.from(h.context.PixelCore.render(snapshot.events)));
   assert.equal(h.post({...a,id:'invalid-large-edge',target:'invalid-large-target',points:[[1024,1023]]}).ok,false);
 });
 test('tiles keep the requested snapshot version during concurrent changes and validate coordinates',()=>{
@@ -195,5 +196,38 @@ test('a partially written 1024 stripe set is repaired before a batch retry is ac
   assert.equal(h.ss.getSheetByName('履歴').getLastRow(),2);
   assert.equal(canvas.getRange(1026,2).getValue(),1);
   assert.equal(canvas.getRange(1024,1024).getValue(),'#FF0000');
-  const snapshot=h.get();assert.deepEqual(snapshot.pixels,Array.from(h.context.PixelCore.render(snapshot.events)));
+  const snapshot=h.get();assert.deepEqual(h.canvasPixels(),Array.from(h.context.PixelCore.render(snapshot.events)));
+});
+
+test('busy writes return immediately while GETs read committed history without taking the lock',()=>{
+  const h=harness(),a=stroke('busy-original');h.post(a);h.setContended(true);h.lockAttempts.length=0;
+  assert.equal(h.get({action:'updates',since:'0'}).events.length,1);
+  assert.equal(h.rawGet().version,1);
+  assert.equal(h.rawGet({action:'tile',version:'1',x:'0',y:'0'}).ok,true);
+  assert.equal(h.rawGet({action:'status'}).appliedVersion,1);
+  assert.equal(h.lockAttempts.length,0);
+  const result=h.post(stroke('busy-rejected'));
+  assert.equal(result.ok,false);assert.equal(result.code,'BUSY');assert.equal(result.retryAfterMs,2000);
+  assert.deepEqual(h.lockAttempts,[100]);assert.equal(h.ss.getSheetByName('履歴').getLastRow(),2);
+});
+test('unapplied history remains readable without triggering RGB repair on a GET',()=>{
+  const h=harness(),a=stroke('read-during-repair');h.failNextRGB();assert.equal(h.post(a).ok,false);
+  h.writes.length=0;h.lockAttempts.length=0;h.setContended(true);
+  const result=h.get({action:'updates',since:'0'});
+  assert.equal(result.version,1);assert.equal(result.appliedVersion,0);assert.equal(result.events[0].id,a.id);
+  assert.equal(h.get().pixels[2570],0xff0000);
+  assert.equal(h.writes.length,0);assert.equal(h.lockAttempts.length,0);
+  h.setContended(false);const retry=h.post(a);
+  assert.equal(retry.ok,true);assert.equal(retry.appliedVersion,1);
+  assert.equal(h.ss.getSheetByName('履歴').getLastRow(),2);
+});
+test('distant strokes write two small patches instead of their million-cell bounding rectangle',()=>{
+  const h=harness({size:1024});h.writes.length=0;
+  const operations=[{...stroke('distant-first'),canvasSize:1024,points:[[0,0]]},
+    {...stroke('distant-second','author-b','#0000ff'),canvasSize:1024,points:[[1023,1023]]}];
+  const result=h.post({operations});assert.equal(result.ok,true);
+  const writes=h.writes.filter(write=>write.sheet==='Canvas1024'&&write.row<=1024);
+  assert.equal(writes.reduce((total,write)=>total+write.width*write.height,0),2);
+  assert.equal(result.timing.cells,2);assert.equal(result.timing.ranges,2);
+  const snapshot=h.get();assert.deepEqual(h.canvasPixels(),Array.from(h.context.PixelCore.render(snapshot.events)));
 });

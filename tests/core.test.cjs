@@ -65,3 +65,37 @@ test('tile decoding accepts compact runs and rejects corrupt, overflowing and in
   for(const data of [{runs:[0,6]},{runs:[0,-1]},{runs:[0,0]},{runs:[0,4]},{runs:[0,5,1]},
     {runs:[-1,5]},{runs:[0x1000000,5]},{pixels:[0,1]},{pixels:[0,1,2,3,-1]}])assert.throws(()=>C.unpack(data,5));
 });
+test('cropped rasterization preserves pixel hashes from the previous full-canvas renderer',()=>{
+  const {createHash}=require('node:crypto'),context=vm.createContext({});
+  vm.runInContext(fs.readFileSync('web/core.js','utf8'),context);const core=context.PixelCore;core.setSize(1024);
+  const events=[
+    {id:'legacy-stroke-op',target:'legacy-stroke-id',author:'author-one',type:'stroke',color:'#FF1234',size:64,points:[[0,0],[255,255]]},
+    {id:'large-stroke-op-one',target:'large-stroke-id-one',author:'author-two',type:'stroke',color:'#123456',size:5,canvasSize:1024,points:[[0,1023],[1023,0]]},
+    {id:'large-stroke-op-two',target:'large-stroke-id-two',author:'author-one',type:'stroke',color:'#78ABCD',size:16,canvasSize:1024,points:[[900,950],[1023,1023],[1000,960]]},
+    {id:'large-stroke-op-three',target:'large-stroke-id-three',author:'author-two',type:'stroke',color:'#00AABB',size:64,canvasSize:1024,points:[[520,520],[450,650],[700,800]]}
+  ];
+  const hash=pixels=>{const bytes=Buffer.alloc(pixels.length*4);for(let i=0;i<pixels.length;i++)bytes.writeUInt32LE(pixels[i],i*4);return createHash('sha256').update(bytes).digest('hex');};
+  // Captured from the renderer in commit b7229ae6, before adding cropped rendering.
+  assert.equal(hash(core.render(events)),'9c8c8969d4847d48750eef73d7ccd50f723db21d363841f66b488a482ef29323');
+  const regions=[{left:0,top:0,right:63,bottom:63},{left:220,top:220,right:300,bottom:300},
+    {left:450,top:500,right:700,bottom:800},{left:768,top:768,right:1023,bottom:1023}];
+  const expected=['546e41167b91493cff5e1863273190f324415aacbd7fa820207b59d650924283',
+    '4894418dac5d9b63dc1813b72aac2f837a99e6d9dc3c37fd79808c2571eb7da7',
+    'b73a41869289c9504240a6b4a0be3cbc5ae4095e075c63dc93afa61caddcf200',
+    '6581cebcb92543ecc2ee73bd62cec6802c957bc74b07414ae9c33a6f22f16f67'];
+  regions.forEach((box,i)=>assert.equal(hash(core.raster(core.reduce(events),box)),expected[i]));
+});
+test('dirty regions cover a wide diagonal without including the distant empty canvas',()=>{
+  const context=vm.createContext({});vm.runInContext(fs.readFileSync('web/core.js','utf8'),context);
+  const core=context.PixelCore;core.setSize(1024);
+  const diagonal={...stroke('wide-dirty-diagonal','author-a','#123456',[[0,0],[1023,1023]],64),canvasSize:1024};
+  const regions=core.dirtyRegions([diagonal]),mask=new Uint8Array(1024*1024);
+  let cells=0;
+  for(const box of regions){
+    const area=(box.right-box.left+1)*(box.bottom-box.top+1);assert.ok(area<=65536);cells+=area;
+    for(let y=box.top;y<=box.bottom;y++)mask.fill(1,y*1024+box.left,y*1024+box.right+1);
+  }
+  assert.ok(cells<262144);
+  const pixels=core.render([diagonal]);
+  for(let i=0;i<pixels.length;i++)if(pixels[i]!==core.WHITE)assert.equal(mask[i],1,'uncovered pixel '+i);
+});

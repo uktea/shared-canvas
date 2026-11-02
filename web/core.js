@@ -43,33 +43,70 @@
     }
     return strokes;
   }
-  function paint(pixels, s) {
-    const color = parseInt(s.color.slice(1),16), radius = s.size / 2, r = Math.floor(radius);
-    const extent=Math.min(SIZE,s.canvasSize || 256);
-    function stamp(x,y) {
-      for (let dy=-r;dy<=r;dy++) for (let dx=-r;dx<=r;dx++) {
-        if (dx*dx+dy*dy > radius*radius) continue;
-        const px=x+dx, py=y+dy;
-        if (px>=0 && px<extent && py>=0 && py<extent) pixels[py*SIZE+px]=color;
-      }
-    }
-    stamp(...s.points[0]);
-    for (let i=1;i<s.points.length;i++) {
-      let [x,y]=s.points[i-1]; const [tx,ty]=s.points[i];
-      const dx=Math.abs(tx-x), dy=-Math.abs(ty-y), sx=x<tx?1:-1, sy=y<ty?1:-1;
+  function centers(s,visit){
+    visit(...s.points[0]);
+    for(let i=1;i<s.points.length;i++){
+      let [x,y]=s.points[i-1];const [tx,ty]=s.points[i];
+      const dx=Math.abs(tx-x),dy=-Math.abs(ty-y),sx=x<tx?1:-1,sy=y<ty?1:-1;
       let err=dx+dy;
-      while(x!==tx || y!==ty) {
+      while(x!==tx||y!==ty){
         const twice=2*err;
         if(twice>=dy){err+=dy;x+=sx;}
         if(twice<=dx){err+=dx;y+=sy;}
-        stamp(x,y);
+        visit(x,y);
       }
     }
   }
-  function render(events) {
-    const pixels=new Uint32Array(SIZE*SIZE); pixels.fill(WHITE);
-    for(const s of reduce(events)) if(s.active) paint(pixels,s);
+  function paint(pixels,s,region){
+    const box=region || {left:0,top:0,right:SIZE-1,bottom:SIZE-1},width=box.right-box.left+1;
+    const color=parseInt(s.color.slice(1),16),radius=s.size/2,r=Math.floor(radius),extent=Math.min(SIZE,s.canvasSize || 256);
+    centers(s,(x,y)=>{
+      const left=Math.max(-r,box.left-x,-x),right=Math.min(r,box.right-x,extent-1-x);
+      const top=Math.max(-r,box.top-y,-y),bottom=Math.min(r,box.bottom-y,extent-1-y);
+      for(let dy=top;dy<=bottom;dy++)for(let dx=left;dx<=right;dx++){
+        if(dx*dx+dy*dy<=radius*radius)pixels[(y+dy-box.top)*width+x+dx-box.left]=color;
+      }
+    });
+  }
+  function raster(strokes,box){
+    const pixels=new Uint32Array((box.right-box.left+1)*(box.bottom-box.top+1));pixels.fill(WHITE);
+    for(const s of strokes)if(s.active!==false){
+      const b=bounds(s);
+      if(b.right>=box.left&&b.left<=box.right&&b.bottom>=box.top&&b.top<=box.bottom)paint(pixels,s,box);
+    }
     return pixels;
+  }
+  function render(events){return raster(reduce(events),{left:0,top:0,right:SIZE-1,bottom:SIZE-1});}
+  function dirtyRegions(strokes,tileSize=64){
+    const tiles=new Map();
+    for(const s of strokes){
+      const extent=Math.min(SIZE,s.canvasSize || 256),r=Math.floor(s.size/2);
+      centers(s,(x,y)=>{
+        const left=Math.max(0,x-r),top=Math.max(0,y-r),right=Math.min(extent-1,x+r),bottom=Math.min(extent-1,y+r);
+        for(let ty=Math.floor(top/tileSize);ty<=Math.floor(bottom/tileSize);ty++)
+          for(let tx=Math.floor(left/tileSize);tx<=Math.floor(right/tileSize);tx++){
+            const key=tx+','+ty,b={left:Math.max(left,tx*tileSize),top:Math.max(top,ty*tileSize),right:Math.min(right,(tx+1)*tileSize-1),bottom:Math.min(bottom,(ty+1)*tileSize-1)};
+            const old=tiles.get(key);
+            if(old){old.left=Math.min(old.left,b.left);old.top=Math.min(old.top,b.top);old.right=Math.max(old.right,b.right);old.bottom=Math.max(old.bottom,b.bottom);}else tiles.set(key,b);
+          }
+      });
+    }
+    const regions=Array.from(tiles.values());
+    // Join exact neighbouring spans, without filling gaps between distant strokes.
+    let merged=true;
+    while(merged){
+      merged=false;
+      outer:for(let i=0;i<regions.length;i++)for(let j=i+1;j<regions.length;j++){
+        const a=regions[i],b=regions[j];
+        const horizontal=a.top===b.top&&a.bottom===b.bottom&&(a.right+1===b.left||b.right+1===a.left);
+        const vertical=a.left===b.left&&a.right===b.right&&(a.bottom+1===b.top||b.bottom+1===a.top);
+        if(!horizontal&&!vertical)continue;
+        const box={left:Math.min(a.left,b.left),top:Math.min(a.top,b.top),right:Math.max(a.right,b.right),bottom:Math.max(a.bottom,b.bottom)};
+        if((box.right-box.left+1)*(box.bottom-box.top+1)>65536)continue;
+        regions[i]=box;regions.splice(j,1);merged=true;break outer;
+      }
+    }
+    return regions.sort((a,b)=>a.top-b.top||a.left-b.left);
   }
   function targets(events,author) {
     const mine=reduce(events).filter(s=>s.author===author);
@@ -97,5 +134,5 @@
     if(offset!==length)throw Error('画素データが不足しています');
     return pixels;
   }
-  root.PixelCore={get SIZE(){return SIZE},WHITE,setSize,validate,reduce,paint,render,targets,bounds,unpack};
+  root.PixelCore={get SIZE(){return SIZE},WHITE,setSize,validate,reduce,paint,render,raster,dirtyRegions,targets,bounds,unpack};
 })(globalThis);

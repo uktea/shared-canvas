@@ -5,6 +5,7 @@
   const key=endpoint || 'local';
   let db, state, drawing=null, pixels, busy=false, editQueue=Promise.resolve(), storageFailed=false, syncTimer=null;
   let batchLimit=1, batchBytes=45000,imageData=null,renderDirty=true,historyTargets={};
+  let failures=0,nextSyncAt=0,needsReceiptCheck=false;
   const ctx=$('canvas').getContext('2d',{alpha:false});
   function status(message){$('status').textContent=message;}
   function edit(fn){const next=editQueue.then(fn);editQueue=next.catch(e=>status(e.message));return next;}
@@ -32,7 +33,8 @@
     const url=new URL(endpoint);url.searchParams.set('client','3');for(const [k,v] of Object.entries(params))url.searchParams.set(k,v);
     const response=await fetch(url,{method:op?'POST':'GET',redirect:'follow',credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(45000),...(op?{headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify(op)}:{})});
     if(!response.ok)throw Error('通信エラー '+response.status);
-    const result=await response.json();if(!result.ok)throw Error(result.error || 'サーバーエラー');
+    const result=await response.json();
+    if(!result.ok)throw Object.assign(Error(result.error || 'サーバーエラー'),{code:result.code,retryAfterMs:result.retryAfterMs});
     // Old deployments keep accepting individual operations until GAS is updated.
     if(result.protocol>=2){batchLimit=Math.max(1,Math.min(50,result.maxBatchOperations||50));batchBytes=Math.max(45000,Math.min(256000,result.maxBatchBytes||256000));}
     return result;
@@ -86,7 +88,10 @@
         for(const e of result.events){if(e.version<=state.version)continue;if(e.version!==state.version+1)throw Error('差分が連続していません');state.events.push(e);state.version=e.version;}
         if(state.version!==result.version)throw Error('差分が不足しています');
       }
-      const ids=new Set(state.events.map(e=>e.id));state.pending=state.pending.filter(e=>!ids.has(e.id));
+      const applied=result.appliedVersion===undefined?state.version:
+        (Number.isInteger(result.appliedVersion)?Math.min(result.appliedVersion,state.version):-1);
+      const ids=new Set(state.events.filter(e=>e.version<=applied).map(e=>e.id));
+      state.pending=state.pending.filter(e=>!ids.has(e.id));
       C.reduce(events());await save();renderDirty=true;refresh();
     }catch(e){state=old;canvasSize(oldSize);renderDirty=true;refresh();throw e;}
   }
@@ -98,19 +103,28 @@
     await edit(async()=>{state.initialized=true;await save();});
   }
   async function sync(){
-    if(!endpoint || busy || storageFailed)return;busy=true;
+    if(!endpoint || busy || storageFailed || Date.now()<nextSyncAt)return;busy=true;
     try{
       await editQueue;
-      if(!state.initialized || !state.pending.length)await pull();
+      if(!state.initialized || !state.pending.length || needsReceiptCheck){await pull();needsReceiptCheck=false;}
       // One outstanding batch; retries retain every individual operation ID.
       for(let count=0;count<8;count++){
         await editQueue;const batch=pendingBatch();if(!batch.length)break;
         status('送信中 · '+batch.length+'件 / 未送信 '+state.pending.length+'件');
+        needsReceiptCheck=true;
         const result=await request({since:state.version},batchLimit>1?{operations:batch}:batch[0]);
         if(result.kind==='reset')await pull();else await edit(()=>absorb(result));
+        needsReceiptCheck=false;
       }
+      failures=0;nextSyncAt=0;
       status(state.pending.length?'未送信 '+state.pending.length+'件':'');
-    }catch(e){status('未同期 · '+e.message);}
+    }catch(e){
+      failures=Math.min(failures+1,6);
+      const base=e.code==='BUSY'?2000:5000;
+      const delay=Math.min(60000,Math.max(Number(e.retryAfterMs)||0,base*2**(failures-1))*(1+Math.random()*.2));
+      nextSyncAt=Date.now()+delay;
+      status('未同期 · '+e.message+' · '+Math.ceil(delay/1000)+'秒後に再試行');
+    }
     finally{busy=false;}
   }
   function position(e){const r=$('canvas').getBoundingClientRect();return [Math.max(0,Math.min(C.SIZE-1,Math.floor((e.clientX-r.left)*C.SIZE/r.width))),Math.max(0,Math.min(C.SIZE-1,Math.floor((e.clientY-r.top)*C.SIZE/r.height)))];}
@@ -132,5 +146,5 @@
   $('zoom').onchange=resize;new ResizeObserver(resize).observe($('stage'));resize();
   $('settings').onclick=()=>{$('endpoint').value=endpoint;$('connection').showModal();};$('close-settings').onclick=()=>$('connection').close();
   $('connection-form').onsubmit=e=>{e.preventDefault();const value=$('endpoint').value.trim();if(value&&!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(value)){$('endpoint').setCustomValidity('GASの /exec URLを入力してください');$('endpoint').reportValidity();return;}localStorage.setItem('canvas-endpoint',value);location.reload();};$('endpoint').oninput=()=>$('endpoint').setCustomValidity('');
-  window.addEventListener('online',sync);document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync();});setInterval(()=>{if(!document.hidden)sync();},4000);sync();
+  window.addEventListener('online',()=>{nextSyncAt=0;sync();});document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync();});setInterval(()=>{if(!document.hidden)sync();},4000);sync();
 })();

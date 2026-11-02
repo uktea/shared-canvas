@@ -4,6 +4,7 @@ function canvasSize_(){return 1024;}
 function markerRow_(){return PixelCore.SIZE+2;}
 function setup() {
   PixelCore.setSize(canvasSize_());
+  if(!PixelCore.raster||!PixelCore.dirtyRegions)throw Error('Core.gsも最新版に更新してください');
   const lock=LockService.getScriptLock(); lock.waitLock(25000);
   try {
     const ss=book_();
@@ -33,36 +34,40 @@ function load_(ss,since,total){
     return Object.assign(JSON.parse(row[5]),{version:Number(row[0])});
   });
 }
-function materialize_(ss,events,region){
-  const canvas=ss.getSheetByName(CANVAS_SHEET_),size=PixelCore.SIZE,pixels=PixelCore.render(events);
-  const box=region || {left:0,top:0,right:size-1,bottom:size-1},width=box.right-box.left+1;
-  // Keep each Sheets write at or below 65,536 cells; publish the marker last.
-  const stripe=Math.max(1,Math.floor(65536/width));
-  for(let top=box.top;top<=box.bottom;top+=stripe){
-    const rows=[];
-    for(let y=top;y<=Math.min(box.bottom,top+stripe-1);y++){
-      const row=[];for(let x=box.left;x<=box.right;x++)row.push('#'+pixels[y*size+x].toString(16).padStart(6,'0').toUpperCase());rows.push(row);
+function materialize_(ss,events,regions){
+  const canvas=ss.getSheetByName(CANVAS_SHEET_),size=PixelCore.SIZE,strokes=PixelCore.reduce(events);
+  const boxes=regions || [{left:0,top:0,right:size-1,bottom:size-1}];
+  const timing={renderMs:0,rgbWriteMs:0,cells:0,ranges:0};
+  console.log(JSON.stringify({stage:'rgb_render_write',version:events.length,regions:boxes.length}));
+  for(const box of boxes){
+    const width=box.right-box.left+1,stripe=Math.max(1,Math.floor(65536/width));
+    let started=Date.now();const pixels=PixelCore.raster(strokes,box);timing.renderMs+=Date.now()-started;
+    for(let top=box.top;top<=box.bottom;top+=stripe){
+      const rows=[];
+      for(let y=top;y<=Math.min(box.bottom,top+stripe-1);y++){
+        const row=[];for(let x=box.left;x<=box.right;x++)row.push('#'+pixels[(y-box.top)*width+x-box.left].toString(16).padStart(6,'0').toUpperCase());rows.push(row);
+      }
+      started=Date.now();canvas.getRange(top+1,box.left+1,rows.length,width).setValues(rows);
+      timing.rgbWriteMs+=Date.now()-started;timing.cells+=rows.length*width;timing.ranges++;
     }
-    canvas.getRange(top+1,box.left+1,rows.length,width).setValues(rows);
   }
-  SpreadsheetApp.flush();
+  console.log(JSON.stringify({stage:'rgb_flush',version:events.length,cells:timing.cells,ranges:timing.ranges}));
+  const started=Date.now();SpreadsheetApp.flush();
   canvas.getRange(markerRow_(),1,1,2).setValues([['反映済み更新番号',events.length]]);SpreadsheetApp.flush();
+  timing.rgbWriteMs+=Date.now()-started;
+  return timing;
 }
-function repair_(ss,events){
-  if(ss.getSheetByName(CANVAS_SHEET_).getRange(markerRow_(),2).getValue()!==events.length)materialize_(ss,events);
+function applied_(canvas,total){
+  const version=canvas.getRange(markerRow_(),2).getValue();
+  if(!Number.isInteger(version)||version<0||version>total)throw Error('RGBの初期化が必要です。setupを実行してください');
+  return version;
 }
 function json_(obj){
-  return ContentService.createTextOutput(JSON.stringify(Object.assign({protocol:3,canvasSize:PixelCore.SIZE,maxBatchOperations:50,maxBatchBytes:256000},obj))).setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(JSON.stringify(Object.assign({protocol:3,revision:4,canvasSize:PixelCore.SIZE,maxBatchOperations:50,maxBatchBytes:256000},obj))).setMimeType(ContentService.MimeType.JSON);
 }
-function region_(events,added){
+function regions_(events,added){
   const strokes=new Map(events.filter(op=>op.type==='stroke').map(op=>[op.target,op]));
-  const box={left:PixelCore.SIZE-1,top:PixelCore.SIZE-1,right:0,bottom:0};
-  for(const op of added){
-    const bounds=PixelCore.bounds(strokes.get(op.target));
-    box.left=Math.min(box.left,bounds.left);box.top=Math.min(box.top,bounds.top);
-    box.right=Math.max(box.right,bounds.right);box.bottom=Math.max(box.bottom,bounds.bottom);
-  }
-  return box;
+  return PixelCore.dirtyRegions(Array.from(new Set(added.map(op=>op.target)),target=>strokes.get(target)));
 }
 function manifest_(events){
   const tiles=new Map();
@@ -76,18 +81,9 @@ function manifest_(events){
 function tile_(ss,total,params){
   const version=Number(params.version),x=Number(params.x),y=Number(params.y),size=PixelCore.SIZE;
   if(!Number.isInteger(version)||version<0||version>total||!Number.isInteger(x)||!Number.isInteger(y)||x<0||y<0||x>=size||y>=size||x%TILE_SIZE_||y%TILE_SIZE_)throw Error('タイル指定が不正です');
-  const width=Math.min(TILE_SIZE_,size-x),height=Math.min(TILE_SIZE_,size-y),canvas=ss.getSheetByName(CANVAS_SHEET_);
-  let pixels=[];
-  if(version===total&&canvas.getRange(markerRow_(),2).getValue()===total){
-    pixels=canvas.getRange(y+1,x+1,height,width).getValues().flat().map(value=>{
-      if(!/^#[0-9a-fA-F]{6}$/.test(String(value)))throw Error('RGBデータが不正です');
-      return parseInt(value.slice(1),16);
-    });
-  }else{
-    // History is retained, so tiles remain at the manifest version during edits.
-    const image=PixelCore.render(load_(ss,0,version));
-    for(let row=y;row<y+height;row++)for(let column=x;column<x+width;column++)pixels.push(image[row*size+column]);
-  }
+  const width=Math.min(TILE_SIZE_,size-x),height=Math.min(TILE_SIZE_,size-y);
+  // History rows are immutable: GET never waits for a writer or reads half-written RGB.
+  const pixels=Array.from(PixelCore.raster(PixelCore.reduce(load_(ss,0,version)),{left:x,top:y,right:x+width-1,bottom:y+height-1}));
   const runs=[];
   for(const color of pixels){if(runs.length&&runs[runs.length-2]===color)runs[runs.length-1]++;else runs.push(color,1);}
   return Object.assign({ok:true,kind:'tile',version:version,x:x,y:y,width:width,height:height},runs.length<pixels.length?{runs:runs}:{pixels:pixels});
@@ -129,38 +125,51 @@ function doGet(e){return handle_(e,false);}
 function doPost(e){return handle_(e,true);}
 function handle_(e,write){
   PixelCore.setSize(canvasSize_());
-  const lock=LockService.getScriptLock();
-  if(!lock.tryLock(25000))return json_({ok:false,error:'混雑しています。再送します'});
+  const started=Date.now();let lock,acquired=false;
   try{
+    if(!PixelCore.raster||!PixelCore.dirtyRegions)throw Error('Core.gsも最新版に更新してください');
     if(PixelCore.SIZE>256&&e.parameter.client!=='3')throw Error('ページを再読み込みしてください');
-    const ss=book_(),canvas=ss.getSheetByName(CANVAS_SHEET_),history=ss.getSheetByName('履歴');
+    if(write){
+      lock=LockService.getScriptLock();
+      if(!lock.tryLock(100))return json_({ok:false,code:'BUSY',retryAfterMs:2000,error:'書き込み中です。少し待って再送します'});
+      acquired=true;
+    }
+    const lockWaitMs=Date.now()-started,ss=book_(),canvas=ss.getSheetByName(CANVAS_SHEET_),history=ss.getSheetByName('履歴');
     if(!canvas || !history)throw Error('setupを実行してください');
     const total=Math.max(0,history.getLastRow()-1),since=Number(e.parameter.since);
-    if(!write&&e.parameter.action==='tile')return json_(tile_(ss,total,e.parameter));
-    // Up-to-date polling reads only the requested history tail, never the RGB grid.
-    if(!write && e.parameter.action==='updates' && canvas.getRange(markerRow_(),2).getValue()===total){
-      if(!Number.isInteger(since)||since<0||since>total||total-since>500)return json_({ok:true,kind:'reset'});
-      return json_({ok:true,kind:'delta',version:total,events:load_(ss,since,total)});
-    }
-    const events=load_(ss,0,total);repair_(ss,events);
-    if(write){
-      if(!e.postData || e.postData.contents.length>256000)throw Error('送信データが大きすぎます');
-      const added=accept_(events,JSON.parse(e.postData.contents));
-      if(added.length){
-        const rows=added.map(op=>{
-          const clean=Object.assign({},op);delete clean.version;
-          return [op.version,op.id,op.author,op.type,op.target,JSON.stringify(clean),new Date().toISOString()];
-        });
-        const needed=total+1+rows.length,maxRows=history.getMaxRows();
-        if(needed>maxRows)history.insertRowsAfter(maxRows,needed-maxRows);
-        history.getRange(total+2,1,rows.length,7).setValues(rows);
-        SpreadsheetApp.flush();events.push(...added);
-        materialize_(ss,events,region_(events,added));
+    if(!write){
+      if(e.parameter.action==='tile')return json_(tile_(ss,total,e.parameter));
+      const appliedVersion=canvas.getRange(markerRow_(),2).getValue();
+      if(e.parameter.action==='status')return json_({ok:true,kind:'status',version:total,appliedVersion:appliedVersion});
+      if(e.parameter.action==='updates'){
+        if(!Number.isInteger(since)||since<0||since>total||total-since>500)return json_({ok:true,kind:'reset'});
+        return json_({ok:true,kind:'delta',version:total,appliedVersion:appliedVersion,events:load_(ss,since,total)});
       }
-      return json_(delta_(events,since));
+      return json_(Object.assign(manifest_(load_(ss,0,total)),{appliedVersion:appliedVersion}));
     }
-    if(e.parameter.action==='updates')return json_(delta_(events,Number(e.parameter.since)));
-    return json_(manifest_(events));
+    console.log(JSON.stringify({stage:'history_read',version:total}));
+    let phase=Date.now();const events=load_(ss,0,total),applied=applied_(canvas,total),historyMs=Date.now()-phase;
+    if(!e.postData || e.postData.contents.length>256000)throw Error('送信データが大きすぎます');
+    phase=Date.now();const added=accept_(events,JSON.parse(e.postData.contents)),validateMs=Date.now()-phase;
+    let logMs=0;
+    if(added.length){
+      console.log(JSON.stringify({stage:'history_write',operations:added.length}));
+      const rows=added.map(op=>{
+        const clean=Object.assign({},op);delete clean.version;
+        return [op.version,op.id,op.author,op.type,op.target,JSON.stringify(clean),new Date().toISOString()];
+      });
+      phase=Date.now();const needed=total+1+rows.length,maxRows=history.getMaxRows();
+      if(needed>maxRows)history.insertRowsAfter(maxRows,needed-maxRows);
+      history.getRange(total+2,1,rows.length,7).setValues(rows);SpreadsheetApp.flush();
+      events.push(...added);logMs=Date.now()-phase;
+    }
+    // Repair only the accepted operations missing from RGB, together with this batch.
+    const missing=events.slice(applied);
+    phase=Date.now();const regions=missing.length?regions_(events,missing):[],regionMs=Date.now()-phase;
+    const rgb=missing.length?materialize_(ss,events,regions):{renderMs:0,rgbWriteMs:0,cells:0,ranges:0};
+    const timing=Object.assign({stage:'complete',lockWaitMs,historyMs,validateMs,logMs,regionMs,operations:added.length,totalMs:Date.now()-started},rgb);
+    console.log(JSON.stringify(timing));
+    return json_(Object.assign(delta_(events,since),{appliedVersion:events.length,timing:timing}));
   }catch(err){return json_({ok:false,error:String(err.message || err)});}
-  finally{lock.releaseLock();}
+  finally{if(acquired)lock.releaseLock();}
 }
