@@ -45,3 +45,23 @@ test('invalid and oversized data is rejected before rasterization',()=>{
   C.validate(stroke('valid-one'));
   for(const patch of [{points:[]},{points:[[256,0]]},{points:[[0.5,2]]},{size:0},{size:65},{color:'red'},{type:'erase'},{points:Array(2001).fill([1,1])}])assert.throws(()=>C.validate({...stroke('invalid-one'),...patch}));
 });
+test('1024 browser and GAS renderers match at distant edges while legacy strokes stay clipped',()=>{
+  const browser=vm.createContext({}),gas=vm.createContext({});
+  vm.runInContext(fs.readFileSync('web/core.js','utf8'),browser);vm.runInContext(fs.readFileSync('gas/Core.gs','utf8'),gas);
+  for(const context of [browser,gas])context.PixelCore.setSize(1024);
+  const events=[stroke('legacy-edge','author-a','#FF0000',[[255,255]],64),
+    {...stroke('large-diagonal','author-b','#123456',[[300,700],[1023,1023]],5),canvasSize:1024}];
+  for(const event of events)browser.PixelCore.validate(event);
+  const pixels=browser.PixelCore.render(events);
+  assert.equal(pixels.length,1048576);assert.equal(pixels[255*1024+255],0xff0000);
+  assert.equal(pixels[255*1024+256],C.WHITE);assert.equal(pixels.at(-1),0x123456);
+  assert.deepEqual(Array.from(pixels),Array.from(gas.PixelCore.render(events)));
+  assert.throws(()=>browser.PixelCore.setSize(2048));
+  assert.throws(()=>browser.PixelCore.validate({...events[1],points:[[1024,0]]}));
+});
+test('tile decoding accepts compact runs and rejects corrupt, overflowing and incomplete data',()=>{
+  assert.deepEqual(Array.from(C.unpack({runs:[0xffffff,3,0x123456,2]},5)),[0xffffff,0xffffff,0xffffff,0x123456,0x123456]);
+  assert.deepEqual(Array.from(C.unpack({pixels:[0,1,2]},3)),[0,1,2]);
+  for(const data of [{runs:[0,6]},{runs:[0,-1]},{runs:[0,0]},{runs:[0,4]},{runs:[0,5,1]},
+    {runs:[-1,5]},{runs:[0x1000000,5]},{pixels:[0,1]},{pixels:[0,1,2,3,-1]}])assert.throws(()=>C.unpack(data,5));
+});

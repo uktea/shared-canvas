@@ -1,15 +1,22 @@
 /* Shared verbatim with Apps Script. Coordinates are integer pixel centers. */
 (function (root) {
   'use strict';
-  const SIZE = 256, WHITE = 0xffffff;
+  let SIZE = 256;
+  const WHITE = 0xffffff;
+  function setSize(size){
+    if(![256,512,1024].includes(size))throw Error('キャンバスサイズが不正です');
+    SIZE=size;
+  }
   function validate(op) {
     const id = x => typeof x === 'string' && /^[a-zA-Z0-9_-]{8,100}$/.test(x);
     if (!op || !id(op.id) || !id(op.author) || !id(op.target)) throw Error('操作IDが不正です');
     if (!['stroke','undo','redo'].includes(op.type)) throw Error('操作の種類が不正です');
     if (op.type === 'stroke') {
+      const extent=op.canvasSize===undefined?256:op.canvasSize;
+      if(![256,512,1024].includes(extent)||extent>SIZE)throw Error('ストロークの描画範囲が不正です');
       if (!/^#[0-9a-fA-F]{6}$/.test(op.color) || !Number.isInteger(op.size) || op.size < 1 || op.size > 64) throw Error('ブラシ設定が不正です');
       if (!Array.isArray(op.points) || !op.points.length || op.points.length > 2000) throw Error('座標数が不正です');
-      for (const xy of op.points) if (!Array.isArray(xy) || xy.length !== 2 || !xy.every(n => Number.isInteger(n) && n >= 0 && n < SIZE)) throw Error('座標が不正です');
+      for (const xy of op.points) if (!Array.isArray(xy) || xy.length !== 2 || !xy.every(n => Number.isInteger(n) && n >= 0 && n < extent)) throw Error('座標が不正です');
     }
   }
   function reduce(events) {
@@ -38,11 +45,12 @@
   }
   function paint(pixels, s) {
     const color = parseInt(s.color.slice(1),16), radius = s.size / 2, r = Math.floor(radius);
+    const extent=Math.min(SIZE,s.canvasSize || 256);
     function stamp(x,y) {
       for (let dy=-r;dy<=r;dy++) for (let dx=-r;dx<=r;dx++) {
         if (dx*dx+dy*dy > radius*radius) continue;
         const px=x+dx, py=y+dy;
-        if (px>=0 && px<SIZE && py>=0 && py<SIZE) pixels[py*SIZE+px]=color;
+        if (px>=0 && px<extent && py>=0 && py<extent) pixels[py*SIZE+px]=color;
       }
     }
     stamp(...s.points[0]);
@@ -68,5 +76,26 @@
     return {undo:mine.filter(s=>s.active).at(-1)?.target,
       redo:mine.filter(s=>!s.active && s.redoable).sort((a,b)=>b.undoOrder-a.undoOrder)[0]?.target};
   }
-  root.PixelCore={SIZE,WHITE,validate,reduce,paint,render,targets};
+  function bounds(s){
+    const extent=Math.min(SIZE,s.canvasSize || 256),r=Math.floor(s.size/2);
+    const xs=s.points.map(p=>p[0]),ys=s.points.map(p=>p[1]);
+    return {left:Math.max(0,Math.min(...xs)-r),top:Math.max(0,Math.min(...ys)-r),
+      right:Math.min(extent-1,Math.max(...xs)+r),bottom:Math.min(extent-1,Math.max(...ys)+r)};
+  }
+  function unpack(data,length){
+    if(Array.isArray(data.pixels)){
+      if(data.pixels.length!==length||data.pixels.some(p=>!Number.isInteger(p)||p<0||p>WHITE))throw Error('画素データが不正です');
+      return Uint32Array.from(data.pixels);
+    }
+    if(!Array.isArray(data.runs)||data.runs.length%2)throw Error('圧縮画素データが不正です');
+    const pixels=new Uint32Array(length);let offset=0;
+    for(let i=0;i<data.runs.length;i+=2){
+      const color=data.runs[i],count=data.runs[i+1];
+      if(!Number.isInteger(color)||color<0||color>WHITE||!Number.isInteger(count)||count<=0||offset+count>length)throw Error('圧縮画素データが不正です');
+      pixels.fill(color,offset,offset+count);offset+=count;
+    }
+    if(offset!==length)throw Error('画素データが不足しています');
+    return pixels;
+  }
+  root.PixelCore={get SIZE(){return SIZE},WHITE,setSize,validate,reduce,paint,render,targets,bounds,unpack};
 })(globalThis);
