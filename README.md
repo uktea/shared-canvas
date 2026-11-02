@@ -2,9 +2,15 @@
 
 256×256、整数座標の不透明丸ブラシ。ビルド・依存パッケージなし。白／ライトグレー／ダークグレーのUI、Material Symbols、拡大表示、IndexedDB、独立した描画順と更新番号、作者ごとのUndo／Redo、4秒間隔の差分取得と再送を実装。
 
+## 公開先
+
+https://uktea.github.io/shared-canvas/
+
+`web/config.js` に共有GASの接続先を設定済み。以前に接続設定を保存したブラウザでは、その設定を優先する。
+
 ## ローカルで使う
 
-Node.js 22以上とPython 3で `npm test`、`npm start`。http://localhost:8080 を開く。接続先が空欄ならローカル専用。HTTPSまたはlocalhostが必要。
+Node.js 22以上とPython 3で `npm test`、`npm start`。http://localhost:8080 を開く。初期接続先は公開GAS。ローカル専用で使う場合は接続設定を空欄にする。HTTPSまたはlocalhostが必要。
 
 ## GAS・スプレッドシート
 
@@ -22,7 +28,9 @@ Node.js 22以上とPython 3で `npm test`、`npm start`。http://localhost:8080 
 
 ## 実接続の受け入れ確認
 
-デプロイ先未提供のため、実環境でのCORS、権限、同時利用、処理時間・クォータは未検証。
+2026-11-03確認：PagesはHTTP 200、直近の公開ワークフローは成功。GASは認証なしのGETでリダイレクト後にJSONを返し、`Access-Control-Allow-Origin: *` を確認。更新43のスナップショット（43イベント）の全65,536ピクセルが共通描画処理による再構築結果と一致し、差分取得も成功した。自動テスト11件成功。
+
+実ブラウザでのCORS・POST・複数利用者の同時操作・処理時間・クォータは未検証。以下を受け入れ確認として実施する。
 
 1. Pagesを開きGAS接続設定。NetworkでGETがリダイレクト後にJSONとして読めることを確認。認証画面のHTMLやCORSエラーなら公開設定を確認する。
 2. 1点・斜線・端・太さ1/64を描く。POSTは `text/plain`、カスタムヘッダーなしで送信する。レスポンスを読めない `no-cors` は使わない。
