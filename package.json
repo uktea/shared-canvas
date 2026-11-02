@@ -1,0 +1,1 @@
+{"name":"shared-canvas","private":true,"scripts":{"test":"node --test tests/*.test.cjs","sync-core":"node scripts/sync-core.mjs","start":"python3 -m http.server 8080 --directory web"}}

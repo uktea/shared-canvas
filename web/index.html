@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f0f0f0">
+<title>共有キャンバス</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@400&display=block">
+<link rel="stylesheet" href="style.css">
+<script src="config.js" defer></script><script src="core.js" defer></script><script src="app.js" defer></script>
+</head>
+<body>
+<header><a class="wordmark" href="./"><span class="symbol" aria-hidden="true">grid_on</span>共有キャンバス</a><div class="header-end"><span class="edition">256 × 256</span><button id="settings" class="icon" aria-label="接続設定" title="接続設定"><span class="symbol" aria-hidden="true">settings</span></button></div></header>
+<main>
+<div class="workspace-heading"><h1>キャンバス</h1><span id="mode">ローカル</span></div>
+<section class="workspace" aria-label="描画エリア">
+<div class="toolbar" role="toolbar" aria-label="描画ツール">
+<label class="color-control" title="描画色"><input id="color" type="color" value="#333333" aria-label="描画色"><span id="hex">#333333</span></label>
+<span class="separator"></span>
+<label class="brush-control"><span class="symbol" aria-hidden="true">brush</span><input id="size" type="range" min="1" max="64" value="4" aria-label="ブラシの太さ"><output id="size-value" for="size">4 px</output></label>
+<span class="separator"></span>
+<button id="undo" class="icon" aria-label="自分の描画を元に戻す" title="元に戻す (Ctrl+Z)" disabled><span class="symbol" aria-hidden="true">undo</span></button>
+<button id="redo" class="icon" aria-label="自分の描画をやり直す" title="やり直す (Ctrl+Shift+Z)" disabled><span class="symbol" aria-hidden="true">redo</span></button>
+</div>
+<div id="stage" class="stage"><div id="paper"><canvas id="canvas" width="256" height="256" aria-label="共有描画キャンバス" tabindex="0"></canvas><div id="cursor" hidden></div></div></div>
+<div class="workspace-footer"><span id="status" role="status" aria-live="polite"></span><div class="zoom-control"><span class="symbol" aria-hidden="true">zoom_in</span><select id="zoom" aria-label="表示倍率"><option value="fit">画面に合わせる</option value="1">100%</option><option value="2">200%</option><option value="3">300%</option><option value="4">400%</option></select></div></div>
+</section>
+<footer><span>共有キャンバス</span><span id="version">更新 0</span></footer>
+</main>
+<dialog id="connection"><form id="connection-form"><div class="dialog-heading"><h2>接続設定</h2><button type="button" id="close-settings" class="icon" aria-label="設定を閉じる"><span class="symbol" aria-hidden="true">close</span></button></div><label for="endpoint">GAS WebアプリURL</label><input id="endpoint" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"><p class="dialog-note">空欄の場合は、このブラウザに保存します。接続先ごとにデータを保持します。</p><div class="dialog-actions"><button type="submit" class="primary">保存</button></div></form></dialog>
+</body></html>
